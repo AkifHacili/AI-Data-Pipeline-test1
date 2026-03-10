@@ -1,0 +1,129 @@
+
+# TEKNOFEST 2026 Havacılıkta Yapay Zeka - Veri Seti Birleştirme Betiği
+# Bu betik FiftyOne kütüphanesini kullanarak farklı veri setlerini birleştirir ve şartnameye uygun hale getirir.
+
+# 1. GEREKLİ KÜTÜPHANELERİN KURULUMU
+# Terminale şu komutu yazın:
+# pip install fiftyone torch torchvision
+
+import fiftyone as fo
+import fiftyone.utils.yolo as fouy
+import os
+
+# --- YAPILANDIRMA (DEĞİŞTİRİN) ---
+DATASETS_CONFIG = [
+    {
+        "name": "visdrone",
+        "path": "C:/VeriSetleri/VisDrone", # DEĞİŞTİR: VisDrone ana klasör yolu
+        "type": fo.types.COCODetectionDataset, # Örnek: COCO formatı
+        "label_path": "annotations.json"
+    },
+    {
+        "name": "coco_subset",
+        "path": "C:/VeriSetleri/COCO", # DEĞİŞTİR: COCO ana klasör yolu
+        "type": fo.types.COCODetectionDataset,
+        "label_path": "instances_train2017.json"
+    },
+    # Diğer veri setlerini buraya ekleyebilirsiniz (DOTA, UAVDT vb.)
+]
+
+EXPORT_DIR = "teknofest_master_dataset" # Dışa aktarılacak klasör adı
+
+# --- SINIF EŞLEŞTİRME (MAPPING) ---
+# TEKNOFEST Standart ID'leri:
+# 0: Taşıt, 1: İnsan, 2: UAP, 3: UAİ
+CLASS_MAP = {
+    # Taşıt (ID 0)
+    "car": "tasit", "van": "tasit", "truck": "tasit", "bus": "tasit", 
+    "train": "tasit", "locomotive": "tasit", "wagon": "tasit", 
+    "ship": "tasit", "boat": "tasit", "bicycle": "tasit", "motorcycle": "tasit",
+    "motor": "tasit", "vehicle": "tasit", "airplane": "tasit",
+    
+    # İnsan (ID 1)
+    "person": "insan", "pedestrian": "insan", "human": "insan",
+    
+    # UAP (ID 2)
+    "uap": "uap", "parking_area": "uap", "parking": "uap",
+    
+    # UAİ (ID 3)
+    "uai": "uai", "landing_area": "uai", "helipad": "uai"
+}
+
+FINAL_CLASSES = ["tasit", "insan", "uap", "uai"]
+
+def merge_and_clean():
+    master_dataset = fo.Dataset("teknofest_master")
+    
+    for config in DATASETS_CONFIG:
+        print(f"Yükleniyor: {config['name']}...")
+        if not os.path.exists(config['path']):
+            print(f"HATA: {config['path']} yolu bulunamadı! Atlanıyor...")
+            continue
+            
+        ds = fo.Dataset.from_dir(
+            dataset_dir=config['path'],
+            dataset_type=config['type'],
+            labels_path=config.get('label_path'),
+            name=config['name']
+        )
+        master_dataset.add_samples(ds)
+
+    print("Sınıf eşleştirme ve özel mantık uygulanıyor...")
+    
+    for sample in master_dataset:
+        if not sample.detections: continue
+        
+        detections = sample.detections.detections
+        new_detections = []
+        
+        # 1. Adım: Temel Eşleştirme
+        for det in detections:
+            label = det.label.lower()
+            if label in CLASS_MAP:
+                det.label = CLASS_MAP[label]
+                new_detections.append(det)
+        
+        # 2. Adım: Özel Şartname Kuralları (Logic)
+        # Not: Bu kısım basitleştirilmiş bir çakışma kontrolü gerektirir.
+        # FiftyOne içinde 'overlap' analizi yapılabilir.
+        
+        final_list = []
+        humans = [d for d in new_detections if d.label == "insan"]
+        vehicles = [d for d in new_detections if d.label == "tasit"]
+        others = [d for d in new_detections if d.label in ["uap", "uai"]]
+        
+        # Bisiklet/Motosiklet/Scooter Mantığı:
+        # Basitlik için: Eğer bir taşıt ve insan çok yakınsa (çakışıyorsa) kuralı uygula.
+        for v in vehicles:
+            has_rider = False
+            for h in humans:
+                # IOU veya merkez uzaklığı kontrolü (Örnek mantık)
+                # if compute_iou(v.bounding_box, h.bounding_box) > 0.5:
+                #     has_rider = True
+                pass
+            
+            # Şartname: Bisiklet/Motor üzerinde insan varsa insanı sil, sadece taşıt kalsın.
+            # Scooter: Sürücü varsa İnsan (ID 1), yoksa Taşıt (ID 0).
+            # (Bu mantık veri setindeki 'scooter' etiketine göre özelleştirilmelidir)
+            final_list.append(v)
+            
+        final_list.extend(humans)
+        final_list.extend(others)
+        
+        sample.detections.detections = final_list
+        sample.save()
+
+    # Gereksiz sınıfları temizle
+    master_dataset.filter_labels("detections", fo.ViewField("label").is_in(FINAL_CLASSES))
+
+    print(f"Dışa aktarılıyor: {EXPORT_DIR}...")
+    master_dataset.export(
+        export_dir=EXPORT_DIR,
+        dataset_type=fo.types.YOLOv8Dataset,
+        label_field="detections",
+        classes=FINAL_CLASSES
+    )
+    print("İşlem başarıyla tamamlandı!")
+
+if __name__ == "__main__":
+    merge_and_clean()

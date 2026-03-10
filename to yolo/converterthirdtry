@@ -1,0 +1,92 @@
+import fiftyone as fo
+import os
+
+# --- YAPILANDIRMA ---
+# Buradaki yolları kendi bilgisayarına göre güncelle
+DATASETS = [
+    {"name": "visdrone", "path": "C:/Veriler/VisDrone", "type": fo.types.COCODetectionDataset},
+    {"name": "coco_sub", "path": "C:/Veriler/COCO", "type": fo.types.COCODetectionDataset},
+]
+
+# Şartname Standart ID'leri [cite: 116, 486]
+# 0: Taşıt, 1: İnsan, 2: UAP, 3: UAİ
+CLASS_MAP = {
+    # Taşıt Grubu (ID 0)
+    "car": "tasit", "van": "tasit", "truck": "tasit", "bus": "tasit", "train": "tasit",
+    "locomotive": "tasit", "wagon": "tasit", "ship": "tasit", "boat": "tasit",
+    "bicycle": "tasit", "motorcycle": "tasit", "motorbike": "tasit", "atv": "tasit",
+    "tractor": "tasit", "tram": "tasit", "scooter": "tasit",
+    
+    # İnsan Grubu (ID 1)
+    "person": "insan", "pedestrian": "insan", "human": "insan",
+    
+    # İniş Alanları
+    "uap": "uap", "uai": "uai"
+}
+
+def compute_iou(box1, box2):
+    """İki kutu arasındaki çakışma oranını (IOU) hesaplar."""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    xi1, yi1 = max(x1, x2), max(y1, y2)
+    xi2, yi2 = min(x1 + w1, x2 + w2), min(y1 + h1, y2 + h2)
+    inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    box1_area, box2_area = w1 * h1, w2 * h2
+    union_area = box1_area + box2_area - inter_area
+    return inter_area / union_area if union_area > 0 else 0
+
+def process_teknofest_logic():
+    master_ds = fo.Dataset("teknofest_final")
+
+    for d_cfg in DATASETS:
+        if not os.path.exists(d_cfg['path']): continue
+        sub_ds = fo.Dataset.from_dir(dataset_dir=d_cfg['path'], dataset_type=d_cfg['type'])
+        master_ds.add_samples(sub_ds)
+
+    print("Şartname kuralları (Scooter/Bisiklet) uygulanıyor...")
+    for sample in master_ds:
+        if not sample.detections: continue
+        
+        # Sınıfları eşle
+        for det in sample.detections.detections:
+            det.label = CLASS_MAP.get(det.label.lower(), "ignore")
+
+        dets = sample.detections.detections
+        to_remove = []
+
+        for i, det_i in enumerate(dets):
+            for j, det_j in enumerate(dets):
+                if i == j: continue
+                iou = compute_iou(det_i.bounding_box, det_j.bounding_box)
+                
+                if iou > 0.3: # Çakışma varsa
+                    # KURAL: Bisiklet/Motor + Sürücü -> Sürücüyü sil, Taşıt kalsın 
+                    if det_i.label == "tasit" and det_j.label == "insan":
+                        to_remove.append(j)
+                    
+                    # KURAL: Scooter + Sürücü -> Taşıtı (scooter) sil, İnsan kalsın 
+                    # (Not: Veri setinde 'scooter' etiketi varsa bu çalışır)
+                    if "scooter" in str(det_i.tags) and det_j.label == "insan":
+                        to_remove.append(i)
+
+        # Temizlik ve Kayıt
+        sample.detections.detections = [
+            d for k, d in enumerate(dets) if k not in to_remove and d.label != "ignore"
+        ]
+        sample.save()
+
+    # Eğitim ve Test olarak %80/%20 böl
+    master_ds.take(int(len(master_ds) * 0.2)).tag_samples("val")
+    master_ds.match_tags("val", bool_and=False).tag_samples("train")
+
+    # Dışa aktar
+    master_ds.export(
+        export_dir="teknofest_yolo_dataset",
+        dataset_type=fo.types.YOLOv8Dataset,
+        label_field="detections",
+        classes=["tasit", "insan", "uap", "uai"]
+    )
+    print("İşlem tamam! 'teknofest_yolo_dataset' klasörü hazır.")
+
+if __name__ == "__main__":
+    process_teknofest_logic()
